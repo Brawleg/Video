@@ -1,1 +1,386 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Видеочат на Firebase</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #1a1a2e;
+            color: #fff;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            margin-bottom: 10px;
+        }
+        .room-controls {
+            margin: 15px 0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .room-controls input {
+            padding: 8px 12px;
+            border-radius: 5px;
+            border: none;
+            font-size: 16px;
+        }
+        .room-controls button {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 5px;
+            background: #e94560;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .room-controls button:hover {
+            background: #c73e54;
+        }
+        .video-container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 20px;
+            width: 100%;
+            max-width: 900px;
+        }
+        .video-box {
+            flex: 1 1 300px;
+            background: #16213e;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+        .video-box video {
+            width: 100%;
+            height: auto;
+            display: block;
+            background: #0f0f1f;
+        }
+        .video-box .label {
+            padding: 6px 0;
+            background: #0f3460;
+            font-size: 14px;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 8px 16px;
+            background: #16213e;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .error {
+            color: #ff6b6b;
+        }
+        .success {
+            color: #51cf66;
+        }
+        #logs {
+            margin-top: 15px;
+            width: 100%;
+            max-width: 600px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: #0f0f1f;
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 12px;
+            color: #aaa;
+            text-align: left;
+            font-family: monospace;
+            border: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+    <h1>📹 Видеочат (WebRTC + Firebase)</h1>
 
+    <div class="room-controls">
+        <input type="text" id="roomInput" placeholder="Название комнаты" value="myroom" />
+        <button id="joinBtn">Присоединиться</button>
+        <button id="leaveBtn" disabled>Покинуть</button>
+    </div>
+
+    <div class="video-container">
+        <div class="video-box">
+            <video id="localVideo" autoplay muted playsinline></video>
+            <div class="label">📷 Ваше видео</div>
+        </div>
+        <div class="video-box">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div class="label">👤 Видео собеседника</div>
+        </div>
+    </div>
+
+    <div id="status" class="status">Ожидание подключения...</div>
+    <div id="logs"></div>
+
+    <!-- Подключаем Firebase (Compat) -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+    <script>
+        // ======================================================
+        // 1. ВСТАВЬТЕ СВОИ НАСТРОЙКИ FIREBASE (из консоли)
+        // ======================================================
+        // (продолжение в Части 2)
+              const firebaseConfig = {
+            apiKey: "ВАШ_API_KEY",
+            authDomain: "ratka-ad3c4.firebaseapp.com",
+            databaseURL: "https://ratka-ad3c4-default-rtdb.firebaseio.com/",
+            projectId: "ratka-ad3c4",
+            storageBucket: "ratka-ad3c4.appspot.com",
+            messagingSenderId: "ваш_sender_id",
+            appId: "ваш_app_id"
+        };
+
+        // Инициализируем Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // ======================================================
+        // 2. Элементы DOM
+        // ======================================================
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const roomInput = document.getElementById('roomInput');
+        const joinBtn = document.getElementById('joinBtn');
+        const leaveBtn = document.getElementById('leaveBtn');
+        const statusDiv = document.getElementById('status');
+        const logsDiv = document.getElementById('logs');
+
+        function log(msg, isError = false) {
+            const p = document.createElement('div');
+            p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            p.style.color = isError ? '#ff6b6b' : '#aaa';
+            logsDiv.appendChild(p);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        function setStatus(text, isError = false) {
+            statusDiv.textContent = text;
+            statusDiv.className = 'status ' + (isError ? 'error' : 'success');
+        }
+
+        // ======================================================
+        // 3. WebRTC и сигналинг
+        // ======================================================
+        let localStream = null;
+        let peerConnection = null;
+        let roomRef = null;
+        let isCaller = false;
+        let roomName = '';
+
+        // Публичные STUN-серверы Google (для TURN можно добавить свой)
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Запрашиваем доступ к камере и микрофону
+        async function getLocalStream() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = stream;
+                localStream = stream;
+                log('✅ Доступ к камере/микрофону получен');
+                return stream;
+            } catch (err) {
+                log('❌ Ошибка доступа к медиа: ' + err.message, true);
+                setStatus('Ошибка: нет доступа к камере/микрофону', true);
+                throw err;
+            }
+        }
+
+        // Создание PeerConnection
+        function createPeerConnection() {
+            const pc = new RTCPeerConnection(rtcConfig);
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            }
+
+            pc.ontrack = (event) => {
+                if (event.streams.length > 0) {
+                    remoteVideo.srcObject = event.streams[0];
+                    log('📡 Получен удаленный поток');
+                }
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const candidateData = {
+                        type: 'candidate',
+                        candidate: event.candidate,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        sdpMid: event.candidate.sdpMid
+                    };
+                    sendSignal(candidateData);
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                log(`🔄 Состояние соединения: ${state}`);
+                if (state === 'connected') {
+                    setStatus('✅ Соединение установлено!');
+                } else if (state === 'failed' || state === 'disconnected') {
+                    setStatus('❌ Соединение разорвано', true);
+                }
+            };
+
+            return pc;
+        }
+
+        function sendSignal(data) {
+            if (!roomRef) return;
+            const signalRef = roomRef.child('signals').push();
+            signalRef.set(data).catch(err => log('Ошибка отправки сигнала: ' + err.message, true));
+        }
+
+        function listenForSignals() {
+            if (!roomRef) return;
+            roomRef.child('signals').on('child_added', (snapshot) => {
+                const data = snapshot.val();
+                log(`📩 Получен сигнал: ${data.type}`);
+                handleSignal(data);
+                snapshot.ref.remove().catch(() => {});
+            });
+        }
+
+        async function handleSignal(data) {
+            if (!peerConnection) return;
+
+            try {
+                if (data.type === 'offer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    sendSignal({ type: 'answer', sdp: answer.sdp });
+                    log('📤 Отправлен ответ');
+                } else if (data.type === 'answer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+                    log('✅ Удаленное описание установлено');
+                } else if (data.type === 'candidate') {
+                    const candidate = new RTCIceCandidate({
+                        candidate: data.candidate,
+                        sdpMLineIndex: data.sdpMLineIndex,
+                        sdpMid: data.sdpMid
+                    });
+                    await peerConnection.addIceCandidate(candidate);
+                    log('🧊 Добавлен ICE-кандидат');
+                }
+            } catch (err) {
+                log('❌ Ошибка обработки сигнала: ' + err.message, true);
+            }
+        }
+
+        // ======================================================
+        // 4. Основные функции: присоединение / выход
+        // ======================================================
+        async function joinRoom() {
+            roomName = roomInput.value.trim() || 'myroom';
+            if (!roomName) {
+                setStatus('Введите название комнаты', true);
+                return;
+            }
+
+            try {
+                await getLocalStream();
+            } catch {
+                return;
+            }
+
+            peerConnection = createPeerConnection();
+            roomRef = database.ref('rooms/' + roomName);
+
+            await roomRef.child('signals').remove();
+            listenForSignals();
+
+            const counterRef = roomRef.child('counter');
+            counterRef.transaction((current) => {
+                return (current || 0) + 1;
+            }, (error, committed, snapshot) => {
+                if (error) {
+                    log('Ошибка транзакции: ' + error.message, true);
+                    return;
+                }
+                if (committed) {
+                    const count = snapshot.val();
+                    isCaller = (count === 1);
+                    log(`👥 Вы участник #${count} (${isCaller ? 'инициатор' : 'приёмник'})`);
+                    setStatus(`Подключение к комнате "${roomName}"...`);
+
+                    if (isCaller) {
+                        peerConnection.createOffer()
+                            .then(offer => peerConnection.setLocalDescription(offer))
+                            .then(() => {
+                                sendSignal({ type: 'offer', sdp: peerConnection.localDescription.sdp });
+                                log('📤 Отправлен offer');
+                            })
+                            .catch(err => log('Ошибка создания offer: ' + err.message, true));
+                    }
+                }
+            });
+
+            joinBtn.disabled = true;
+            leaveBtn.disabled = false;
+            roomInput.disabled = true;
+        }
+
+        function leaveRoom() {
+            if (roomRef) {
+                roomRef.child('signals').off();
+                roomRef.child('counter').remove();
+                roomRef = null;
+            }
+
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+                localVideo.srcObject = null;
+            }
+
+            remoteVideo.srcObject = null;
+            setStatus('Вы вышли из комнаты');
+            log('👋 Вы покинули комнату');
+
+            joinBtn.disabled = false;
+            leaveBtn.disabled = true;
+            roomInput.disabled = false;
+            isCaller = false;
+        }
+
+        // ======================================================
+        // 5. Обработчики событий
+        // ======================================================
+        joinBtn.addEventListener('click', joinRoom);
+        leaveBtn.addEventListener('click', leaveRoom);
+
+        window.addEventListener('load', () => {
+            log('🚀 Приложение загружено. Введите комнату и нажмите "Присоединиться"');
+        });
+
+        window.addEventListener('beforeunload', () => {
+            leaveRoom();
+        });
+    </script>
+</body>
+</html>
